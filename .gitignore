@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+smart_insight.db
+data/smart_insight.db
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
