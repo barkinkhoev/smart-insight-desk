@@ -1,11 +1,18 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TicketCreate(BaseModel):
-    text: str
+    text: str = Field(min_length=10, max_length=2000)
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def strip_text(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 class TicketRead(BaseModel):

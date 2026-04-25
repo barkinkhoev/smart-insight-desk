@@ -1,7 +1,16 @@
-import random
+import json
+import os
+import traceback
+
+from dotenv import load_dotenv
 
 from fastapi import Depends, FastAPI, HTTPException
+from openai import OpenAI, RateLimitError
+import openai
 from sqlalchemy.orm import Session
+
+# Load environment variables from .env before importing database settings.
+load_dotenv()
 
 from models import Base, SessionLocal, Ticket, engine
 from schemas import AnalyticsResponse, TicketCreate, TicketRead
@@ -14,22 +23,46 @@ app = FastAPI(
     redoc_url=None,
 )
 
+client = OpenAI()
 
-def fake_ai_analyze(text: str) -> tuple[float, str]:
-    """Placeholder for future AI analysis."""
-    sentiment_score = round(random.uniform(-1.0, 1.0), 3)
+def analyze_with_openai(text: str) -> tuple[float, str]:
+    """Run ticket analysis through OpenAI and return normalized results."""
+    print(f"OPENAI_API_KEY set: {bool(os.getenv('OPENAI_API_KEY'))}")  # TEMP: debug only.
 
-    lowered = text.lower()
-    if any(keyword in lowered for keyword in ["refund", "money", "payment", "invoice"]):
-        pain_point = "billing"
-    elif any(keyword in lowered for keyword in ["login", "password", "access", "sign in"]):
-        pain_point = "authentication"
-    elif any(keyword in lowered for keyword in ["slow", "lag", "crash", "error"]):
-        pain_point = "product stability"
-    elif any(keyword in lowered for keyword in ["support", "agent", "operator"]):
-        pain_point = "customer support"
-    else:
-        pain_point = "general dissatisfaction"
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You analyze customer support tickets. "
+                        "Return only valid JSON with keys sentiment_score and pain_point. "
+                        "sentiment_score must be a number from -1.0 to 1.0, where negative means unhappy and positive means happy. "
+                        "pain_point must be a short lowercase label."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": text,
+                },
+            ],
+            response_format={"type": "json_object"},
+        )
+    except Exception:
+        traceback.print_exc()
+        raise
+
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("OpenAI returned an empty analysis response.")
+
+    try:
+        payload = json.loads(content)
+        sentiment_score = float(payload["sentiment_score"])
+        pain_point = str(payload["pain_point"]).strip()
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("OpenAI returned invalid analysis data.") from exc
 
     return sentiment_score, pain_point
 
@@ -42,8 +75,8 @@ def get_db():
         db.close()
 
 
-def analyze_and_store_ticket(db: Session, text: str) -> Ticket:
-    sentiment_score, pain_point = fake_ai_analyze(text)
+def store_ticket_to_db(db: Session, text: str, sentiment_score: float, pain_point: str) -> Ticket:
+    """Persist the analyzed ticket fields needed for analytics reporting."""
     ticket = Ticket(
         text=text,
         status="processed",
@@ -63,10 +96,30 @@ def on_startup() -> None:
 
 @app.post("/submit-ticket", response_model=TicketRead)
 def submit_ticket(payload: TicketCreate, db: Session = Depends(get_db)):
-    if not payload.text.strip():
-        raise HTTPException(status_code=400, detail="Ticket text must not be empty.")
-
-    return analyze_and_store_ticket(db, payload.text)
+    try:
+        sentiment_score, pain_point = analyze_with_openai(payload.text)
+        return store_ticket_to_db(db, payload.text, sentiment_score, pain_point)
+    except RateLimitError as exc:
+        traceback.print_exc()
+        detail = "OpenAI quota exceeded. Please check billing or usage limits."
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error", {})
+            if isinstance(error, dict) and error.get("code") == "insufficient_quota":
+                detail = "OpenAI quota exceeded: insufficient quota for this request."
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except openai.OpenAIError as exc:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=502,
+            detail="OpenAI analysis failed. Please try again later.",
+        ) from exc
+    except ValueError as exc:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=502,
+            detail="OpenAI returned invalid analysis data.",
+        ) from exc
 
 
 @app.get("/analytics", response_model=AnalyticsResponse)

@@ -6,3 +6,4 @@ data/smart_insight.db
 .mypy_cache/
 .venv/
 venv/
+.env
