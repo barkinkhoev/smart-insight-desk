@@ -3,3 +3,7 @@ uvicorn[standard]
 sqlalchemy
 openai
 python-dotenv
+requests
+httpx
+alembic
+aiosqlite
